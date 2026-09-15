@@ -55,8 +55,8 @@ CARGOS_STAFF_IDS = [
 ]
 
 # Canais do sistema de Carta Surpresa
-CANAL_PAINEL_CARTA_ID = 333333333333333333   # TROQUE AQUI — onde fica o painel fixo
-CANAL_REVISAO_CARTA_ID = 444444444444444444  # TROQUE AQUI — onde a staff avalia as cartas
+CANAL_PAINEL_CARTA_ID = 1549473376521691246   # #crm — onde fica o painel fixo
+CANAL_REVISAO_CARTA_ID = 1549473403189072023  # onde a staff avalia as cartas
 
 _CARTA_DATA_PATH = os.getenv("PINKIE_CARTA_DATA_PATH", "/data/pinkie_carta.json")
 

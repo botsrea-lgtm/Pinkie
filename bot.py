@@ -145,7 +145,8 @@ async def on_ready():
         for carta_id, registro in dados_cartas.get("cartas", {}).items():
             if registro.get("status") == "pendente":
                 bot.add_view(_ViewVotarCarta(carta_id))
-        await _configurar_painel_carta()
+        status = await _configurar_painel_carta()
+        print(f"[pinkie-carta] {status}")
     except Exception as e:
         print(f"[pinkie-carta] erro ao configurar o painel da carta surpresa: {e!r}")
 
@@ -168,6 +169,18 @@ async def cmd_oi(ctx: commands.Context):
 @bot.command(name="piada")
 async def cmd_piada(ctx: commands.Context):
     await ctx.reply(f"🤡 {frase_aleatoria(FRASES_PIADA)}")
+
+
+@bot.command(name="configurarcarta")
+async def cmd_configurar_carta(ctx: commands.Context):
+    """Comando manual (só staff) pra forçar a publicação/atualização do painel
+    da Carta Surpresa sem precisar reiniciar o bot — ótimo pra debugar se ele
+    não apareceu sozinho no on_ready (canal errado, sem permissão, etc)."""
+    if not isinstance(ctx.author, discord.Member) or not _e_staff(ctx.author):
+        await ctx.reply("Só a staff pode usar esse comando! 🎪")
+        return
+    status = await _configurar_painel_carta()
+    await ctx.reply(f"🎪 {status}")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -439,17 +452,21 @@ class PainelCarta(discord.ui.View):
         )
 
 
-async def _configurar_painel_carta() -> None:
-    """Roda quando o bot conecta: publica ou atualiza o painel fixo da Carta
-    Surpresa no canal configurado."""
+async def _configurar_painel_carta() -> str:
+    """Publica ou atualiza o painel fixo da Carta Surpresa no canal configurado.
+    Retorna uma mensagem de status (sucesso ou o motivo de ter pulado), pra dar
+    pra usar tanto no print do on_ready quanto na resposta de um comando manual."""
     if not CANAL_PAINEL_CARTA_ID:
-        print("[pinkie-carta] CANAL_PAINEL_CARTA_ID não configurado — pulei o painel.")
-        return
+        return "CANAL_PAINEL_CARTA_ID não configurado (ainda tá com o valor de exemplo) — pulei o painel."
 
     canal = await _garantir_canal(CANAL_PAINEL_CARTA_ID)
     if canal is None:
-        print(f"[pinkie-carta] canal {CANAL_PAINEL_CARTA_ID} não encontrado — pulei o painel.")
-        return
+        return (
+            f"não encontrei nenhum canal com o ID {CANAL_PAINEL_CARTA_ID}. Confere se "
+            f"esse é mesmo o ID do canal #crm (clique direito no canal > Copiar ID do "
+            f"Canal, com o Modo Desenvolvedor ativado) e se o bot tem o cargo/permissão "
+            f"pra ENXERGAR esse canal."
+        )
 
     embed = discord.Embed(
         title="🎉 Carta Surpresa da Pinkie!",
@@ -472,11 +489,15 @@ async def _configurar_painel_carta() -> None:
             canal, dados, "painel_mensagem_id", embed, PainelCarta()
         )
     except discord.Forbidden:
-        print(f"[pinkie-carta] sem permissão pra enviar/editar mensagem em #{canal.name}.")
-        return
+        return (
+            f"achei o canal #{canal.name}, mas não tenho permissão pra enviar/editar "
+            f"mensagem lá. Dá pro bot as permissões Ver Canal, Enviar Mensagens, "
+            f"Inserir Links e Usar Botões nesse canal."
+        )
 
     dados["painel_mensagem_id"] = mensagem.id
     _salvar_dados_carta(dados)
+    return f"painel publicado/atualizado em #{canal.name}! ✅"
 
 
 # ══════════════════════════════════════════════════════════════════

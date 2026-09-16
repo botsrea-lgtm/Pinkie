@@ -78,8 +78,9 @@ CARGOS_STAFF_IDS = [
 ]
 
 # Canais do sistema de Carta Surpresa
-CANAL_PAINEL_CARTA_ID = 1549826297834766447   # canal dos membros — onde fica o painel fixo
-CANAL_REVISAO_CARTA_ID = 1549826189802348694  # canal da staff — onde a staff avalia as cartas
+CANAL_PAINEL_CARTA_ID = 1549826297834766447        # canal dos membros — onde fica o painel fixo
+CANAL_REVISAO_CARTA_ID = 1549826189802348694       # canal da staff — onde a staff avalia as cartas
+CANAL_PUBLICACAO_CARTA_ID = 1538287965116039211    # canal público — onde a carta é postada quando aceita
 
 # Imagem que acompanha o painel da Carta Surpresa (mostrada no embed pros membros)
 IMAGEM_PAINEL_CARTA_URL = (
@@ -469,6 +470,12 @@ async def cmd_configurar_carta(ctx: commands.Context):
 # reação de qualquer outra pessoa é removida na hora. A decisão fica
 # registrada ali (quem decidiu e quando), a mensagem nunca é apagada
 # e as reações são limpas depois de decidida, pra travar o resultado.
+#
+# Quando aceita, a carta é publicada de verdade em
+# CANAL_PUBLICACAO_CARTA_ID, num embed bonito e sem pingar ninguém —
+# se a pessoa escolheu anônima, não aparece nome nem ID nenhum ali; só
+# se ela escolheu "com o nome" é que o nome aparece (como texto puro,
+# nunca como @menção/ping).
 # ══════════════════════════════════════════════════════════════════
 
 def _carregar_dados_carta() -> dict:
@@ -567,6 +574,54 @@ def _embed_carta(registro: dict, decidido_por: discord.Member = None) -> discord
 
     embed.set_footer(text="🎪 Pinkie Pie  •  Carta Surpresa")
     return embed
+
+
+def _embed_publicacao_carta(registro: dict) -> discord.Embed:
+    """Embed 'bonito' pra carta já aceita, publicado no canal público
+    (CANAL_PUBLICACAO_CARTA_ID). NUNCA usa @menção — texto puro, no máximo —
+    e só mostra qualquer identificação de quem escreveu se a pessoa NÃO
+    marcou anônimo. Se marcou anônimo, não aparece nome, avatar nem ID."""
+    anonimo = registro.get("anonimo", False)
+
+    embed = discord.Embed(
+        title="💌 Uma Carta Surpresa chegou!",
+        description=registro["texto"],
+        color=COR_PINKIE,
+    )
+
+    if anonimo:
+        embed.set_author(name="Remetente misterioso 🎭")
+    else:
+        # Nome como texto puro (nunca <@id>/mention) — sem pingar ninguém.
+        avatar_url = registro.get("autor_avatar_url")
+        if avatar_url:
+            embed.set_author(name=f"De: {registro.get('autor_nome', 'alguém do servidor')}", icon_url=avatar_url)
+        else:
+            embed.set_author(name=f"De: {registro.get('autor_nome', 'alguém do servidor')}")
+
+    embed.set_footer(text="🎪 Pinkie Pie  •  Carta Surpresa")
+    return embed
+
+
+async def _publicar_carta_aceita(registro: dict) -> None:
+    """Quando a staff aceita uma carta, publica ela (no formato bonito, sem
+    pingar ninguém) no canal público. Se o canal não estiver configurado ou
+    não for encontrado, só registra no log e segue a vida — a decisão em si
+    já foi salva de qualquer forma."""
+    if not CANAL_PUBLICACAO_CARTA_ID:
+        print("[pinkie-carta] CANAL_PUBLICACAO_CARTA_ID não configurado — pulei a publicação pública.")
+        return
+
+    canal = await _garantir_canal(CANAL_PUBLICACAO_CARTA_ID)
+    if canal is None:
+        print(f"[pinkie-carta] não encontrei o canal de publicação {CANAL_PUBLICACAO_CARTA_ID}.")
+        return
+
+    embed = _embed_publicacao_carta(registro)
+    try:
+        await canal.send(embed=embed)
+    except (discord.Forbidden, discord.HTTPException) as e:
+        print(f"[pinkie-carta] não consegui publicar a carta aceita no canal público: {e!r}")
 
 
 async def _registrar_carta(interaction: discord.Interaction, texto: str, anonimo: bool) -> None:
@@ -690,6 +745,9 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         await mensagem.clear_reactions()
     except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
         print(f"[pinkie-carta] não consegui atualizar a carta {carta_id} após decisão: {e!r}")
+
+    if resposta == "aceita":
+        await _publicar_carta_aceita(registro)
 
 
 class ModalCarta(discord.ui.Modal, title="Carta Surpresa da Pinkie"):

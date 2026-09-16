@@ -7,7 +7,8 @@ alegre, travessa e engraçadinha — a palhaça oficial do servidor CRM.
 Já vem com o sistema de "Carta Surpresa da Pinkie" integrado: um
 formulário onde qualquer um pode escrever uma cartinha (com nome ou
 anônima), que cai num canal de revisão pra staff aprovar ou recusar
-antes de ir pro mundo.
+antes de ir pro mundo — a votação é feita REAGINDO com ✅ ou ❌ na
+mensagem, sem botão nenhum.
 
 COMO USAR
 ──────────
@@ -59,11 +60,17 @@ CARGOS_STAFF_IDS = [
 CANAL_PAINEL_CARTA_ID = 1549473376521691246   # #crm — onde fica o painel fixo
 CANAL_REVISAO_CARTA_ID = 1549473403189072023  # onde a staff avalia as cartas
 
+# Emojis usados pra votar nas cartas (reação, não botão)
+EMOJI_ACEITAR = "✅"
+EMOJI_RECUSAR = "❌"
+
 _CARTA_DATA_PATH = os.getenv("PINKIE_CARTA_DATA_PATH", "/data/pinkie_carta.json")
 
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
+# intents.reactions já vem True no default(); precisamos dele pra escutar as
+# reações de ✅/❌ que a staff coloca na carta.
 
 bot = commands.Bot(command_prefix=PREFIXO, intents=intents, help_command=None)
 
@@ -180,10 +187,6 @@ async def on_ready():
 
     try:
         bot.add_view(PainelCarta())
-        dados_cartas = _carregar_dados_carta()
-        for carta_id, registro in dados_cartas.get("cartas", {}).items():
-            if registro.get("status") == "pendente":
-                bot.add_view(_ViewVotarCarta(carta_id))
         status = await _configurar_painel_carta()
         print(f"[pinkie-carta] {status}")
     except Exception as e:
@@ -257,7 +260,10 @@ async def cmd_ajuda(ctx: commands.Context):
             f"`{PREFIXO}conselho` — um conselho questionável\n"
             f"`{PREFIXO}configurarcarta` — (staff) republica o painel da Carta Surpresa\n\n"
             "E se marcar @Pinkie Pie ou só falar meu nome numa frase, eu apareço "
-            "pra me apresentar! 🎈"
+            "pra me apresentar! 🎈\n\n"
+            f"Pra avaliar uma Carta Surpresa lá no canal de revisão, é só reagir "
+            f"com {EMOJI_ACEITAR} (aceitar) ou {EMOJI_RECUSAR} (recusar) — só a "
+            f"staff conta, o resto é ignorado."
         ),
     )
     await ctx.reply(embed=embed)
@@ -285,10 +291,12 @@ async def cmd_configurar_carta(ctx: commands.Context):
 # A carta cai em CANAL_REVISAO_CARTA_ID — SEMPRE com o nick e o ID de
 # quem mandou, mesmo se a pessoa pediu anonimato (isso só vale pra
 # quando a carta for publicada de verdade depois; a staff nunca perde
-# o rastro de quem escreveu, pra fins de moderação) — junto com dois
-# botões, ✅ Aceitar e ❌ Recusar, só pra staff (CARGOS_STAFF_IDS). A
-# decisão fica registrada ali (quem decidiu e quando), a mensagem
-# nunca é apagada.
+# o rastro de quem escreveu, pra fins de moderação). A Pinkie já reage
+# na hora com ✅ e ❌, e a votação é feita REAGINDO em cima dessas duas
+# — sem botão. Só quem é staff (CARGOS_STAFF_IDS) tem o voto contado;
+# reação de qualquer outra pessoa é removida na hora. A decisão fica
+# registrada ali (quem decidiu e quando), a mensagem nunca é apagada
+# e as reações são limpas depois de decidida, pra travar o resultado.
 # ══════════════════════════════════════════════════════════════════
 
 def _carregar_dados_carta() -> dict:
@@ -315,6 +323,15 @@ def _salvar_dados_carta(dados: dict) -> None:
 
 def _gerar_id_carta() -> str:
     return uuid.uuid4().hex[:10]
+
+
+def _achar_carta_por_mensagem(dados: dict, mensagem_id: int):
+    """Varre as cartas salvas e devolve (carta_id, registro) da que bate com
+    esse ID de mensagem no canal de revisão. None, None se não achar."""
+    for carta_id, registro in dados.get("cartas", {}).items():
+        if registro.get("mensagem_id") == mensagem_id:
+            return carta_id, registro
+    return None, None
 
 
 def _embed_carta(registro: dict, decidido_por: discord.Member = None) -> discord.Embed:
@@ -349,7 +366,14 @@ def _embed_carta(registro: dict, decidido_por: discord.Member = None) -> discord
         else (f"<@{registro['decidido_por']}>" if registro.get("decidido_por") else "a staff")
     )
     if status == "pendente":
-        embed.add_field(name="Status", value="⏳ Esperando a Pinkie (e a staff) darem o veredito", inline=False)
+        embed.add_field(
+            name="Status",
+            value=(
+                f"⏳ Esperando a staff reagir com {EMOJI_ACEITAR} (aceitar) "
+                f"ou {EMOJI_RECUSAR} (recusar)"
+            ),
+            inline=False,
+        )
     elif status == "aceita":
         embed.add_field(name="Status", value=f"✅ Aceita por {quem_decidiu} — CONFETE! 🎊", inline=False)
     else:
@@ -361,7 +385,8 @@ def _embed_carta(registro: dict, decidido_por: discord.Member = None) -> discord
 
 async def _registrar_carta(interaction: discord.Interaction, texto: str, anonimo: bool) -> None:
     """Roda quando alguém envia o modal da carta: publica no canal de revisão
-    (sempre com nick + ID) e salva o registro em disco."""
+    (sempre com nick + ID), já reage com ✅/❌ pra votação, e salva o registro
+    em disco."""
     guild = interaction.guild
     if guild is None:
         return
@@ -391,16 +416,22 @@ async def _registrar_carta(interaction: discord.Interaction, texto: str, anonimo
     }
 
     embed = _embed_carta(registro)
-    view = _ViewVotarCarta(carta_id)
 
     try:
-        mensagem = await canal.send(embed=embed, view=view)
+        mensagem = await canal.send(embed=embed)
     except discord.HTTPException:
         await interaction.response.send_message(
             "Escorreguei numa casca de banana e sua carta não foi. Tenta de novo? 🍌",
             ephemeral=True,
         )
         return
+
+    # Já deixa as duas reações prontas pra staff votar.
+    try:
+        await mensagem.add_reaction(EMOJI_ACEITAR)
+        await mensagem.add_reaction(EMOJI_RECUSAR)
+    except (discord.Forbidden, discord.HTTPException) as e:
+        print(f"[pinkie-carta] não consegui reagir na carta {carta_id}: {e!r}")
 
     registro["mensagem_id"] = mensagem.id
 
@@ -415,75 +446,64 @@ async def _registrar_carta(interaction: discord.Interaction, texto: str, anonimo
     )
 
 
-async def _responder_carta(interaction: discord.Interaction, carta_id: str, resposta: str) -> None:
-    """Roda quando a staff clica em ✅ Aceitar ou ❌ Recusar numa carta. resposta
-    é 'aceita' ou 'recusada'. Só decide na primeira vez — depois disso a decisão
-    fica travada e registrada ali."""
-    if not isinstance(interaction.user, discord.Member) or not _e_staff(interaction.user):
-        await interaction.response.send_message(
-            "Ei ei ei, só a staff pode dar o veredito nessa cartinha! 🎪", ephemeral=True
-        )
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    """Escuta as reações no canal de revisão da carta. Só ✅/❌ importam, só
+    staff tem voto contado (reação de qualquer outra pessoa é removida na
+    hora), e só a primeira decisão vale — depois disso a carta trava."""
+    if payload.channel_id != CANAL_REVISAO_CARTA_ID:
+        return
+    if payload.member is None or payload.member.bot:
+        return
+
+    emoji = str(payload.emoji)
+    if emoji not in (EMOJI_ACEITAR, EMOJI_RECUSAR):
         return
 
     dados = _carregar_dados_carta()
-    registro = dados.get("cartas", {}).get(carta_id)
+    carta_id, registro = _achar_carta_por_mensagem(dados, payload.message_id)
     if registro is None:
-        await interaction.response.send_message("Hmm, essa carta sumiu igual mágica de palhaço. Não existe mais.", ephemeral=True)
+        return  # reação em alguma outra mensagem do canal, não é carta
+
+    canal = await _garantir_canal(payload.channel_id)
+    if canal is None:
+        return
+
+    membro = payload.member
+
+    if not _e_staff(membro):
+        # Reação de quem não é staff não conta — some com ela.
+        try:
+            mensagem = await canal.fetch_message(payload.message_id)
+            await mensagem.remove_reaction(payload.emoji, membro)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
         return
 
     if registro.get("status") != "pendente":
-        await interaction.response.send_message(
-            "Essa carta já foi avaliada por outra pessoa da staff — chegou atrasado no circo! 🎟️",
-            ephemeral=True,
-        )
+        # Carta já foi decidida antes — tira a reação atrasada também.
+        try:
+            mensagem = await canal.fetch_message(payload.message_id)
+            await mensagem.remove_reaction(payload.emoji, membro)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
         return
 
+    resposta = "aceita" if emoji == EMOJI_ACEITAR else "recusada"
     registro["status"] = resposta
-    registro["decidido_por"] = interaction.user.id
+    registro["decidido_por"] = membro.id
     registro["decidido_em"] = time.time()
     _salvar_dados_carta(dados)
 
-    embed = _embed_carta(registro, decidido_por=interaction.user)
-
-    view = interaction.view
-    for item in view.children:
-        item.disabled = True
-
-    await interaction.response.edit_message(embed=embed, view=view)
-
-
-class _ViewVotarCarta(discord.ui.View):
-    """Botões ✅ Aceitar / ❌ Recusar de UMA carta específica — o custom_id
-    carrega o ID da carta, então precisa ser recriada (e re-registrada) pra
-    cada carta ainda pendente sempre que o bot reinicia."""
-
-    def __init__(self, carta_id: str):
-        super().__init__(timeout=None)
-        self.carta_id = carta_id
-
-        botao_aceitar = discord.ui.Button(
-            label="Aceitar",
-            emoji="✅",
-            style=discord.ButtonStyle.success,
-            custom_id=f"pinkie_carta_aceitar:{carta_id}",
-        )
-        botao_aceitar.callback = self._aceitar
-        self.add_item(botao_aceitar)
-
-        botao_recusar = discord.ui.Button(
-            label="Recusar",
-            emoji="❌",
-            style=discord.ButtonStyle.danger,
-            custom_id=f"pinkie_carta_recusar:{carta_id}",
-        )
-        botao_recusar.callback = self._recusar
-        self.add_item(botao_recusar)
-
-    async def _aceitar(self, interaction: discord.Interaction):
-        await _responder_carta(interaction, self.carta_id, "aceita")
-
-    async def _recusar(self, interaction: discord.Interaction):
-        await _responder_carta(interaction, self.carta_id, "recusada")
+    try:
+        mensagem = await canal.fetch_message(payload.message_id)
+        embed = _embed_carta(registro, decidido_por=membro)
+        await mensagem.edit(embed=embed)
+        # Limpa as reações pra travar visualmente o resultado (ninguém mais
+        # consegue votar em cima de uma carta já decidida).
+        await mensagem.clear_reactions()
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+        print(f"[pinkie-carta] não consegui atualizar a carta {carta_id} após decisão: {e!r}")
 
 
 class ModalCarta(discord.ui.Modal, title="Carta Surpresa da Pinkie"):

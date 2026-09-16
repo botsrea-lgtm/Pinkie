@@ -768,6 +768,8 @@ async def _configurar_painel_carta() -> str:
         ),
         color=COR_PINKIE,
     )
+    if IMAGEM_PAINEL_CARTA_URL:
+        embed.set_image(url=IMAGEM_PAINEL_CARTA_URL)
     embed.set_footer(text="🎪 Pinkie Pie  •  Carta Surpresa")
 
     dados = _carregar_dados_carta()

@@ -74,8 +74,15 @@ CARGOS_STAFF_IDS = [
 ]
 
 # Canais do sistema de Carta Surpresa
-CANAL_PAINEL_CARTA_ID = 1549473376521691246   # #crm — onde fica o painel fixo
-CANAL_REVISAO_CARTA_ID = 1549473403189072023  # onde a staff avalia as cartas
+CANAL_PAINEL_CARTA_ID = 1549826297834766447   # canal dos membros — onde fica o painel fixo
+CANAL_REVISAO_CARTA_ID = 1549826189802348694  # canal da staff — onde a staff avalia as cartas
+
+# Imagem que acompanha o painel da Carta Surpresa (mostrada no embed pros membros)
+IMAGEM_PAINEL_CARTA_URL = (
+    "https://cdn.discordapp.com/attachments/926913851172204577/"
+    "1549833284694057100/ChatGPT_Image_16_de_set._de_2026_14_23_54.png"
+    "?ex=6aac2239&is=6aaad0b9&hm=78c833317111168a47e64177c61d1d09be2544112f05e5e293b6d8f20419d031"
+)
 
 # Emojis usados pra votar nas cartas (reação, não botão)
 EMOJI_ACEITAR = "✅"

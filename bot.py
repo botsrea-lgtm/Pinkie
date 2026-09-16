@@ -471,13 +471,16 @@ async def _configurar_painel_carta() -> str:
     embed = discord.Embed(
         title="🎉 Carta Surpresa da Pinkie!",
         description=(
-            "Psiu! 🎈 Às vezes bate aquela vontade de escrever alguma coisa — um "
-            "desabafo, uma piada, um agradecimento ou só uma zoeira de leve — e essa "
-            "cartinha pode até alegrar o dia de alguém.\n\n"
+            "Psiu! 💌 Às vezes bate aquela vontade de colocar em palavras o que a gente "
+            "tá sentindo — um desabafo, uma reflexão, um agradecimento, ou uma mensagem "
+            "pra alguém especial. Não existe sentimento certo ou errado pra compartilhar, "
+            "e às vezes uma cartinha sua pode tocar o coração de quem precisava ler "
+            "exatamente aquilo.\n\n"
             "Clica no botão abaixo, escolhe se quer aparecer com o seu nome ou de "
-            "máscara de palhaço (anônima), e escreve sua carta. A staff dá uma "
-            "olhadinha antes de soltar no mundo. 🎪\n\n"
-            "🤡 **Pinkie:** ...eu não prometo que não vou rir. Só prometo que alguém vai ler!"
+            "máscara de palhaço (anônima), e escreve sua carta com carinho. A staff dá "
+            "uma olhadinha antes de soltar no mundo. 🎪\n\n"
+            "🤡 **Pinkie:** pode escrever sem medo — eu vou guardar cada cartinha com "
+            "todo cuidado. Só prometo uma coisa: alguém vai ler. 💕"
         ),
         color=COR_PINKIE,
     )

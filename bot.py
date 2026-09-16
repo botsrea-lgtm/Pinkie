@@ -412,11 +412,25 @@ async def on_message(message: discord.Message):
 
     conteudo = message.content or ""
 
-    # Se marcou a Pinkie (@) ou falou o nome dela (ou "pink") na mensagem,
-    # ela olha se tem algum pedido reconhecível na frase (piada, abraço,
-    # festa, sorte, conselho, pix, oi) e responde na hora. Se não reconhecer
-    # nada (nem com a tolerância a erro de digitação), ela só se apresenta.
-    foi_chamada = bot.user in message.mentions or _NOME_PINKIE_REGEX.search(conteudo)
+    # Se marcou a Pinkie com uma @menção DE VERDADE (escolhida no autocomplete
+    # do Discord, o que deixa a tag "<@ID>" escrita no texto) ou falou o nome
+    # dela (ou "pink") na mensagem, ela olha se tem algum pedido reconhecível
+    # na frase (piada, abraço, festa, sorte, conselho, pix, oi) e responde na
+    # hora. Se não reconhecer nada (nem com a tolerância a erro de digitação),
+    # ela só se apresenta.
+    #
+    # IMPORTANTE: não usamos `bot.user in message.mentions` aqui de propósito.
+    # Quando alguém RESPONDE (reply) a uma mensagem da Pinkie, o Discord
+    # adiciona ela em message.mentions automaticamente (é o "ping de
+    # resposta"), mesmo que a pessoa não tenha digitado nada com o nome dela
+    # — foi assim que "tetando" e outras respostas neutras dispararam a
+    # apresentação de novo. Checando o texto direto (a tag "<@ID>" só aparece
+    # no conteúdo quando é uma @menção explícita) a gente ignora esse ping
+    # "de brinde" da resposta e só reage quando a pessoa chamou ela mesmo.
+    mencionou_de_verdade = bool(
+        bot.user and re.search(rf"<@!?{bot.user.id}>", conteudo)
+    )
+    foi_chamada = mencionou_de_verdade or _NOME_PINKIE_REGEX.search(conteudo)
     if foi_chamada:
         resposta = _resposta_interacao_natural(message, conteudo)
         if resposta:

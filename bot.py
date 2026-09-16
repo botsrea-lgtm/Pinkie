@@ -5,17 +5,19 @@ Bot de Discord (discord.py) com a personalidade da Pinkie Pie:
 alegre, travessa e engraçadinha — a palhaça oficial do servidor CRM.
 
 As interações do dia a dia (piada, abraço, festa, sorte, conselho,
-oi) não usam mais comando com prefixo: basta chamar a Pinkie pelo
-nome (ou marcar @Pinkie Pie) numa frase normal, tipo:
+oi, pix/dinheiro) não usam mais comando com prefixo: basta chamar a
+Pinkie pelo nome (ou marcar @Pinkie Pie) numa frase normal, tipo:
 
     "conte uma piada, pink"
     "pinkie me dá um abraço"
     "bora decretar festa pinkie!"
     "pinkie, qual minha sorte hoje?"
     "pinkie me dá um conselho"
+    "pinkie me manda um pix"
 
-Ela procura essas palavras-chave na mensagem e responde na hora. Se
-chamar ela e não pedir nada específico, ela só se apresenta.
+Ela procura essas palavras-chave na mensagem (com tolerância a erro
+de digitação e falta de acento) e responde na hora. Se chamar ela e
+não pedir nada específico, ela só se apresenta.
 
 O único comando com prefixo que sobrou é o `pk!configurarcarta`,
 porque é uma ação técnica de staff (republicar o painel), não uma
@@ -40,11 +42,13 @@ COMO USAR
 ══════════════════════════════════════════════════════════════════
 """
 
+import difflib
 import json
 import os
 import random
 import re
 import time
+import unicodedata
 import uuid
 
 import discord
@@ -140,6 +144,34 @@ FRASES_CONSELHO = [
     "💡 conselho da Pinkie: um pouco de confete resolve muita coisa (não emocionalmente, mas visualmente sim).",
 ]
 
+FRASES_PIX = [
+    "💸 Pix? minha carteira é feita de confete, infelizmente não é aceita em lugar nenhum. mas aceito um abraço como pagamento!",
+    "🤡 ahh eu ADORARIA, mas todo meu dinheiro eu já gastei em purpurina e balão. bota na conta da festa!",
+    "🎪 sem Pix aqui, só tenho piada, abraço e muito confete pra doar. topa essa moeda?",
+]
+
+# Apresentação varia pra não parecer sempre a mesma resposta robotizada.
+FRASES_APRESENTACAO = [
+    (
+        "🎪 Oiii, {alvo}! Eu sou a **Pinkie Pie**, a palhacinha oficial da CRM! 🤡🎈\n"
+        "Adoro espalhar piada, confete e uma bagunça (do tipo boa) por aqui.\n\n"
+        "É só falar comigo numa frase normal! Me chama pelo nome e pede uma piada, um "
+        "abraço, uma festa, sua sorte do dia ou um conselho que eu já te respondo. 💌"
+    ),
+    (
+        "🤡 Opa, {alvo}! Chamou e eu apareci, como sempre — efeito colateral de ser a "
+        "palhacinha oficial daqui.\n\n"
+        "Não entendi exatamente o que você quer, mas pode falar numa frase solta: peça "
+        "uma piada, um abraço, festa, sua sorte de hoje ou um conselho! 🎈"
+    ),
+    (
+        "🎈 *POFT* apareci! Sou a **Pinkie Pie**, e ainda não peguei o que você pediu "
+        "nessa mensagem, {alvo}.\n\n"
+        "Tenta assim: me chama e pede piada, abraço, festa, sorte ou conselho — numa "
+        "frase de boa, sem comando nenhum! 🤡✨"
+    ),
+]
+
 
 def frase_aleatoria(lista: list) -> str:
     return random.choice(lista)
@@ -151,39 +183,83 @@ _NOME_PINKIE_REGEX = re.compile(r"\bpink(ie)?( pie)?\b", re.IGNORECASE)
 
 # Gatilhos de linguagem natural — cada um cobre a intenção principal e
 # algumas variações comuns de como alguém pediria isso numa frase solta.
+# São a primeira tentativa (rápida e exata); se nenhum bater, ainda existe
+# uma segunda passada tolerante a erro de digitação (_categoria_por_fuzzy).
 _GATILHO_PIADA = re.compile(r"piada|\bmeu?\s+fa[cç]a?\s+rir\b|\brir\b", re.IGNORECASE)
 _GATILHO_ABRACO = re.compile(r"abra[cç]o", re.IGNORECASE)
 _GATILHO_FESTA = re.compile(r"\bfesta\b|comemora[cç][aã]o|\bcomemorar\b", re.IGNORECASE)
-_GATILHO_SORTE = re.compile(r"\bsorte\b|previs[aã]o|\bfuturo\b", re.IGNORECASE)
-_GATILHO_CONSELHO = re.compile(r"conselho|me\s+aconselh|\bdica\b", re.IGNORECASE)
-_GATILHO_OI = re.compile(r"\boi+\b|\bol[aá]\b|\bsalve\b|\be\s*a[ií]\b", re.IGNORECASE)
+_GATILHO_SORTE = re.compile(r"\bsorte\b|previs[aã]o|\bfuturo\b|hor[oó]scopo", re.IGNORECASE)
+_GATILHO_CONSELHO = re.compile(
+    r"conselho|concelho|me\s+aconselh|aconselhar|\bdica\b", re.IGNORECASE
+)
+_GATILHO_OI = re.compile(r"\boi+\b|\bol[aá]\b|\bsalve\b|\be\s*a[ií]\b|\bopa\b", re.IGNORECASE)
+_GATILHO_PIX = re.compile(
+    r"\bpix\b|dinheiro|\bgrana\b|doa[cç][aã]o|empr[eé]sta|empr[eé]stimo|\bmoney\b",
+    re.IGNORECASE,
+)
+
+# ── Tolerância a erro de digitação ──────────────────────────────────
+# As regex acima cobrem os jeitos mais comuns de pedir cada coisa, mas
+# sempre aparece alguém que escreve errado de um jeito que a gente nem
+# previu (ex.: "consêlho", "consei", "abrasso"). Em vez de ficar caçando
+# variação por variação, essa segunda passada compara CADA PALAVRA da
+# mensagem (sem acento, minúscula) contra uma palavra "âncora" de cada
+# categoria usando distância de edição (difflib). Se a palavra da
+# mensagem for bem parecida com a âncora, a categoria conta como
+# reconhecida — sem precisar bater 100% com a grafia certa.
+_ANCORAS_POR_CATEGORIA = {
+    "piada": "piada",
+    "abraco": "abraco",
+    "festa": "festa",
+    "sorte": "sorte",
+    "conselho": "conselho",
+    "oi": "oi",
+    "pix": "pix",
+}
+
+
+def _normalizar(texto: str) -> str:
+    """minúsculo e sem acento/cedilha, pra comparação tolerante a erro de
+    digitação (ex.: 'concelho' e 'conselho' ficam bem parecidos)."""
+    texto = texto.lower()
+    texto = unicodedata.normalize("NFKD", texto)
+    return "".join(c for c in texto if not unicodedata.combining(c))
+
+
+def _categoria_por_fuzzy(conteudo: str):
+    """Segunda tentativa, só usada se nenhuma regex exata bateu: quebra a
+    mensagem em palavras e vê se alguma é bem parecida (~75%) com a âncora
+    de alguma categoria. Pega erro de digitação tipo 'consei', 'abrasso',
+    'sorti' etc. sem precisar listar cada variação manualmente."""
+    palavras = re.findall(r"[a-zà-ú]+", _normalizar(conteudo))
+    for palavra in palavras:
+        if len(palavra) < 3:
+            continue  # palavra curta demais gera falso positivo fácil
+        for categoria, ancora in _ANCORAS_POR_CATEGORIA.items():
+            parecido = difflib.SequenceMatcher(None, palavra, ancora).ratio()
+            if parecido >= 0.75:
+                return categoria
+    return None
 
 
 def _apresentacao_pinkie(autor_mention: str) -> str:
-    return (
-        f"🎪 Oiii, {autor_mention}! Eu sou a **Pinkie Pie**, a palhacinha oficial "
-        f"da CRM! 🤡🎈\n"
-        f"Adoro espalhar piada, confete e uma bagunça (do tipo boa) por aqui.\n\n"
-        f"É só falar comigo numa frase normal! Me chama pelo nome e pede uma "
-        f"piada, um abraço, uma festa, sua sorte do dia ou um conselho que eu "
-        f"já te respondo. 💌"
-    )
+    return frase_aleatoria(FRASES_APRESENTACAO).format(alvo=autor_mention)
 
 
 def _resposta_interacao_natural(message: discord.Message, conteudo: str):
     """Olha o conteúdo da mensagem (que já chamou a Pinkie pelo nome ou
     marcou ela) e devolve a resposta certa pra intenção detectada, ou None
-    se não reconheceu nenhum pedido — aí ela só se apresenta."""
+    se não reconheceu nenhum pedido — aí ela só se apresenta.
+
+    Primeiro tenta bater nas regex exatas (mais precisas). Se nenhuma bater,
+    faz uma segunda tentativa tolerante a erro de digitação antes de desistir
+    e cair na apresentação."""
 
     if _GATILHO_PIADA.search(conteudo):
         return f"🤡 {frase_aleatoria(FRASES_PIADA)}"
 
     if _GATILHO_ABRACO.search(conteudo):
-        alvo_membros = [
-            m for m in message.mentions if bot.user is None or m.id != bot.user.id
-        ]
-        alvo = alvo_membros[0].mention if alvo_membros else message.author.mention
-        return frase_aleatoria(FRASES_ABRACO).format(alvo=alvo)
+        return _resposta_abraco(message)
 
     if _GATILHO_FESTA.search(conteudo):
         return frase_aleatoria(FRASES_FESTA)
@@ -194,13 +270,45 @@ def _resposta_interacao_natural(message: discord.Message, conteudo: str):
     if _GATILHO_CONSELHO.search(conteudo):
         return frase_aleatoria(FRASES_CONSELHO)
 
+    if _GATILHO_PIX.search(conteudo):
+        return frase_aleatoria(FRASES_PIX)
+
     if _GATILHO_OI.search(conteudo):
         return (
             f"OIOIOI {message.author.mention}! 🎉 bem-vindo(a) ao meu picadeiro "
             f"particular!"
         )
 
+    # Nenhuma regex exata bateu — última chance, tolerante a erro de
+    # digitação, antes de cair na apresentação genérica.
+    categoria = _categoria_por_fuzzy(conteudo)
+    if categoria == "piada":
+        return f"🤡 {frase_aleatoria(FRASES_PIADA)}"
+    if categoria == "abraco":
+        return _resposta_abraco(message)
+    if categoria == "festa":
+        return frase_aleatoria(FRASES_FESTA)
+    if categoria == "sorte":
+        return frase_aleatoria(FRASES_SORTE)
+    if categoria == "conselho":
+        return frase_aleatoria(FRASES_CONSELHO)
+    if categoria == "pix":
+        return frase_aleatoria(FRASES_PIX)
+    if categoria == "oi":
+        return (
+            f"OIOIOI {message.author.mention}! 🎉 bem-vindo(a) ao meu picadeiro "
+            f"particular!"
+        )
+
     return None
+
+
+def _resposta_abraco(message: discord.Message) -> str:
+    alvo_membros = [
+        m for m in message.mentions if bot.user is None or m.id != bot.user.id
+    ]
+    alvo = alvo_membros[0].mention if alvo_membros else message.author.mention
+    return frase_aleatoria(FRASES_ABRACO).format(alvo=alvo)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -306,8 +414,8 @@ async def on_message(message: discord.Message):
 
     # Se marcou a Pinkie (@) ou falou o nome dela (ou "pink") na mensagem,
     # ela olha se tem algum pedido reconhecível na frase (piada, abraço,
-    # festa, sorte, conselho, oi) e responde na hora. Se não reconhecer
-    # nada, ela só se apresenta.
+    # festa, sorte, conselho, pix, oi) e responde na hora. Se não reconhecer
+    # nada (nem com a tolerância a erro de digitação), ela só se apresenta.
     foi_chamada = bot.user in message.mentions or _NOME_PINKIE_REGEX.search(conteudo)
     if foi_chamada:
         resposta = _resposta_interacao_natural(message, conteudo)

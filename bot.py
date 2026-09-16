@@ -4,6 +4,23 @@
 Bot de Discord (discord.py) com a personalidade da Pinkie Pie:
 alegre, travessa e engraçadinha — a palhaça oficial do servidor CRM.
 
+As interações do dia a dia (piada, abraço, festa, sorte, conselho,
+oi) não usam mais comando com prefixo: basta chamar a Pinkie pelo
+nome (ou marcar @Pinkie Pie) numa frase normal, tipo:
+
+    "conte uma piada, pink"
+    "pinkie me dá um abraço"
+    "bora decretar festa pinkie!"
+    "pinkie, qual minha sorte hoje?"
+    "pinkie me dá um conselho"
+
+Ela procura essas palavras-chave na mensagem e responde na hora. Se
+chamar ela e não pedir nada específico, ela só se apresenta.
+
+O único comando com prefixo que sobrou é o `pk!configurarcarta`,
+porque é uma ação técnica de staff (republicar o painel), não uma
+interação de personalidade.
+
 Já vem com o sistema de "Carta Surpresa da Pinkie" integrado: um
 formulário onde qualquer um pode escrever uma cartinha (com nome ou
 anônima), que cai num canal de revisão pra staff aprovar ou recusar
@@ -45,7 +62,7 @@ except ImportError:
 # ══════════════════════════════════════════════════════════════════
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-PREFIXO = "pk!"
+PREFIXO = "pk!"  # usado só pelo pk!configurarcarta (comando técnico de staff)
 
 # Rosa-choque bem "Pinkie" pros embeds
 COR_PINKIE = discord.Colour.from_rgb(255, 105, 180)
@@ -121,9 +138,18 @@ def frase_aleatoria(lista: list) -> str:
     return random.choice(lista)
 
 
-# Regex pra pegar "pinkie" ou "pinkie pie" em qualquer canto da frase, com ou
-# sem maiúscula, sem confundir com outra palavra parecida.
-_NOME_PINKIE_REGEX = re.compile(r"\bpinkie( pie)?\b", re.IGNORECASE)
+# Regex pra pegar "pinkie", "pinkie pie" ou só "pink" em qualquer canto da
+# frase, com ou sem maiúscula (cobre gente que chama ela de "pink" mesmo).
+_NOME_PINKIE_REGEX = re.compile(r"\bpink(ie)?( pie)?\b", re.IGNORECASE)
+
+# Gatilhos de linguagem natural — cada um cobre a intenção principal e
+# algumas variações comuns de como alguém pediria isso numa frase solta.
+_GATILHO_PIADA = re.compile(r"piada|\bmeu?\s+fa[cç]a?\s+rir\b|\brir\b", re.IGNORECASE)
+_GATILHO_ABRACO = re.compile(r"abra[cç]o", re.IGNORECASE)
+_GATILHO_FESTA = re.compile(r"\bfesta\b|comemora[cç][aã]o|\bcomemorar\b", re.IGNORECASE)
+_GATILHO_SORTE = re.compile(r"\bsorte\b|previs[aã]o|\bfuturo\b", re.IGNORECASE)
+_GATILHO_CONSELHO = re.compile(r"conselho|me\s+aconselh|\bdica\b", re.IGNORECASE)
+_GATILHO_OI = re.compile(r"\boi+\b|\bol[aá]\b|\bsalve\b|\be\s*a[ií]\b", re.IGNORECASE)
 
 
 def _apresentacao_pinkie(autor_mention: str) -> str:
@@ -131,8 +157,43 @@ def _apresentacao_pinkie(autor_mention: str) -> str:
         f"🎪 Oiii, {autor_mention}! Eu sou a **Pinkie Pie**, a palhacinha oficial "
         f"da CRM! 🤡🎈\n"
         f"Adoro espalhar piada, confete e uma bagunça (do tipo boa) por aqui.\n\n"
-        f"Digita `{PREFIXO}ajuda` que eu te mostro tudo que eu sei fazer! 💌"
+        f"É só falar comigo numa frase normal! Me chama pelo nome e pede uma "
+        f"piada, um abraço, uma festa, sua sorte do dia ou um conselho que eu "
+        f"já te respondo. 💌"
     )
+
+
+def _resposta_interacao_natural(message: discord.Message, conteudo: str):
+    """Olha o conteúdo da mensagem (que já chamou a Pinkie pelo nome ou
+    marcou ela) e devolve a resposta certa pra intenção detectada, ou None
+    se não reconheceu nenhum pedido — aí ela só se apresenta."""
+
+    if _GATILHO_PIADA.search(conteudo):
+        return f"🤡 {frase_aleatoria(FRASES_PIADA)}"
+
+    if _GATILHO_ABRACO.search(conteudo):
+        alvo_membros = [
+            m for m in message.mentions if bot.user is None or m.id != bot.user.id
+        ]
+        alvo = alvo_membros[0].mention if alvo_membros else message.author.mention
+        return frase_aleatoria(FRASES_ABRACO).format(alvo=alvo)
+
+    if _GATILHO_FESTA.search(conteudo):
+        return frase_aleatoria(FRASES_FESTA)
+
+    if _GATILHO_SORTE.search(conteudo):
+        return frase_aleatoria(FRASES_SORTE)
+
+    if _GATILHO_CONSELHO.search(conteudo):
+        return frase_aleatoria(FRASES_CONSELHO)
+
+    if _GATILHO_OI.search(conteudo):
+        return (
+            f"OIOIOI {message.author.mention}! 🎉 bem-vindo(a) ao meu picadeiro "
+            f"particular!"
+        )
+
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -235,74 +296,20 @@ async def on_message(message: discord.Message):
         return
 
     conteudo = message.content or ""
-    eh_comando = conteudo.startswith(PREFIXO)
 
-    # Se não for um comando, e alguém marcou a Pinkie (@) ou falou o nome dela
-    # na mensagem, ela se apresenta.
-    if not eh_comando:
-        foi_chamada = bot.user in message.mentions or _NOME_PINKIE_REGEX.search(conteudo)
-        if foi_chamada:
+    # Se marcou a Pinkie (@) ou falou o nome dela (ou "pink") na mensagem,
+    # ela olha se tem algum pedido reconhecível na frase (piada, abraço,
+    # festa, sorte, conselho, oi) e responde na hora. Se não reconhecer
+    # nada, ela só se apresenta.
+    foi_chamada = bot.user in message.mentions or _NOME_PINKIE_REGEX.search(conteudo)
+    if foi_chamada:
+        resposta = _resposta_interacao_natural(message, conteudo)
+        if resposta:
+            await message.reply(resposta)
+        else:
             await message.reply(_apresentacao_pinkie(message.author.mention))
 
     await bot.process_commands(message)
-
-
-@bot.command(name="oi")
-async def cmd_oi(ctx: commands.Context):
-    await ctx.reply(
-        f"OIOIOI {ctx.author.mention}! 🎉 bem-vindo(a) ao meu picadeiro particular. "
-        f"digita `{PREFIXO}piada` se quiser rir (ou gemer, sem julgamento)."
-    )
-
-
-@bot.command(name="piada")
-async def cmd_piada(ctx: commands.Context):
-    await ctx.reply(f"🤡 {frase_aleatoria(FRASES_PIADA)}")
-
-
-@bot.command(name="abraco")
-async def cmd_abraco(ctx: commands.Context, membro: discord.Member = None):
-    alvo = membro.mention if membro else ctx.author.mention
-    frase = frase_aleatoria(FRASES_ABRACO).format(alvo=alvo)
-    await ctx.reply(frase)
-
-
-@bot.command(name="festa")
-async def cmd_festa(ctx: commands.Context):
-    await ctx.reply(frase_aleatoria(FRASES_FESTA))
-
-
-@bot.command(name="sorte")
-async def cmd_sorte(ctx: commands.Context):
-    await ctx.reply(frase_aleatoria(FRASES_SORTE))
-
-
-@bot.command(name="conselho")
-async def cmd_conselho(ctx: commands.Context):
-    await ctx.reply(frase_aleatoria(FRASES_CONSELHO))
-
-
-@bot.command(name="ajuda")
-async def cmd_ajuda(ctx: commands.Context):
-    embed = discord.Embed(
-        title="🎪 O que a Pinkie sabe fazer",
-        color=COR_PINKIE,
-        description=(
-            f"`{PREFIXO}oi` — um oi bem animado\n"
-            f"`{PREFIXO}piada` — uma piada (ou gemido, sem garantia)\n"
-            f"`{PREFIXO}abraco [@alguém]` — um abraço de palhaço\n"
-            f"`{PREFIXO}festa` — decreta festa\n"
-            f"`{PREFIXO}sorte` — uma previsão (nada confiável) do seu dia\n"
-            f"`{PREFIXO}conselho` — um conselho questionável\n"
-            f"`{PREFIXO}configurarcarta` — (staff) republica o painel da Carta Surpresa\n\n"
-            "E se marcar @Pinkie Pie ou só falar meu nome numa frase, eu apareço "
-            "pra me apresentar! 🎈\n\n"
-            f"Pra avaliar uma Carta Surpresa lá no canal de revisão, é só reagir "
-            f"com {EMOJI_ACEITAR} (aceitar) ou {EMOJI_RECUSAR} (recusar) — só a "
-            f"staff conta, o resto é ignorado."
-        ),
-    )
-    await ctx.reply(embed=embed)
 
 
 @bot.command(name="configurarcarta")

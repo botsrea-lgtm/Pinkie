@@ -25,6 +25,7 @@ COMO USAR
 import json
 import os
 import random
+import re
 import time
 import uuid
 
@@ -84,9 +85,47 @@ FRASES_PIADA = [
     "não confia em átomo. eles inventam TUDO. 🧪✨",
 ]
 
+FRASES_ABRACO = [
+    "🤗 *abraço apertado de palhaço* — cuidado que eu meio que aperto forte quando gosto de alguém!",
+    "🎈 vem cá, {alvo}! um abraço de confete e purpurina, cortesia da casa.",
+    "🤡💞 abraço enviado! (com direito a nariz vermelho, é tradição)",
+]
+
+FRASES_FESTA = [
+    "🎉🎊 CONFETE PRA TODO MUNDO! alguém disse festa?? 🥳",
+    "🎪🎈 bora montar o picadeiro aqui mesmo, ninguém segura essa energia!",
+    "🎵 *música de circo tocando ao fundo* — tá OFICIALMENTE decretada: hoje é dia de festa!",
+]
+
+FRASES_SORTE = [
+    "🍀 hoje é dia de sorte! (ou pelo menos eu acho, minha bola de cristal é uma rosquinha)",
+    "🔮 a Pinkie prevê: muitas risadas no seu futuro próximo!",
+    "✨ sua sorte de hoje: alguém vai rir de uma piada sua. talvez seja de pena, mas vale!",
+]
+
+FRASES_CONSELHO = [
+    "💡 conselho da Pinkie: se a vida te der limão, faz uma festa de limonada. literalmente. eu já fiz.",
+    "💡 conselho da Pinkie: ri primeiro, pensa depois. funciona quase sempre!",
+    "💡 conselho da Pinkie: um pouco de confete resolve muita coisa (não emocionalmente, mas visualmente sim).",
+]
+
 
 def frase_aleatoria(lista: list) -> str:
     return random.choice(lista)
+
+
+# Regex pra pegar "pinkie" ou "pinkie pie" em qualquer canto da frase, com ou
+# sem maiúscula, sem confundir com outra palavra parecida.
+_NOME_PINKIE_REGEX = re.compile(r"\bpinkie( pie)?\b", re.IGNORECASE)
+
+
+def _apresentacao_pinkie(autor_mention: str) -> str:
+    return (
+        f"🎪 Oiii, {autor_mention}! Eu sou a **Pinkie Pie**, a palhacinha oficial "
+        f"da CRM! 🤡🎈\n"
+        f"Adoro espalhar piada, confete e uma bagunça (do tipo boa) por aqui.\n\n"
+        f"Digita `{PREFIXO}ajuda` que eu te mostro tudo que eu sei fazer! 💌"
+    )
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -155,6 +194,17 @@ async def on_ready():
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
+
+    conteudo = message.content or ""
+    eh_comando = conteudo.startswith(PREFIXO)
+
+    # Se não for um comando, e alguém marcou a Pinkie (@) ou falou o nome dela
+    # na mensagem, ela se apresenta.
+    if not eh_comando:
+        foi_chamada = bot.user in message.mentions or _NOME_PINKIE_REGEX.search(conteudo)
+        if foi_chamada:
+            await message.reply(_apresentacao_pinkie(message.author.mention))
+
     await bot.process_commands(message)
 
 
@@ -169,6 +219,48 @@ async def cmd_oi(ctx: commands.Context):
 @bot.command(name="piada")
 async def cmd_piada(ctx: commands.Context):
     await ctx.reply(f"🤡 {frase_aleatoria(FRASES_PIADA)}")
+
+
+@bot.command(name="abraco")
+async def cmd_abraco(ctx: commands.Context, membro: discord.Member = None):
+    alvo = membro.mention if membro else ctx.author.mention
+    frase = frase_aleatoria(FRASES_ABRACO).format(alvo=alvo)
+    await ctx.reply(frase)
+
+
+@bot.command(name="festa")
+async def cmd_festa(ctx: commands.Context):
+    await ctx.reply(frase_aleatoria(FRASES_FESTA))
+
+
+@bot.command(name="sorte")
+async def cmd_sorte(ctx: commands.Context):
+    await ctx.reply(frase_aleatoria(FRASES_SORTE))
+
+
+@bot.command(name="conselho")
+async def cmd_conselho(ctx: commands.Context):
+    await ctx.reply(frase_aleatoria(FRASES_CONSELHO))
+
+
+@bot.command(name="ajuda")
+async def cmd_ajuda(ctx: commands.Context):
+    embed = discord.Embed(
+        title="🎪 O que a Pinkie sabe fazer",
+        color=COR_PINKIE,
+        description=(
+            f"`{PREFIXO}oi` — um oi bem animado\n"
+            f"`{PREFIXO}piada` — uma piada (ou gemido, sem garantia)\n"
+            f"`{PREFIXO}abraco [@alguém]` — um abraço de palhaço\n"
+            f"`{PREFIXO}festa` — decreta festa\n"
+            f"`{PREFIXO}sorte` — uma previsão (nada confiável) do seu dia\n"
+            f"`{PREFIXO}conselho` — um conselho questionável\n"
+            f"`{PREFIXO}configurarcarta` — (staff) republica o painel da Carta Surpresa\n\n"
+            "E se marcar @Pinkie Pie ou só falar meu nome numa frase, eu apareço "
+            "pra me apresentar! 🎈"
+        ),
+    )
+    await ctx.reply(embed=embed)
 
 
 @bot.command(name="configurarcarta")

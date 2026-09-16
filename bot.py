@@ -162,10 +162,36 @@ def _e_staff(membro: discord.Member) -> bool:
     return any(cid in cargos_do_membro for cid in CARGOS_STAFF_IDS)
 
 
+async def _achar_painel_existente(canal, titulo_esperado: str):
+    """Vasculha as últimas mensagens do canal atrás de um painel que a própria
+    Pinkie já tenha mandado (mesmo título, mandado por ela, sem os campos que
+    só as cartas individuais têm). É o plano B pra quando o ID salvo em disco
+    não existe mais (ex.: JSON não persistiu entre deploys) — evita mandar um
+    painel duplicado do zero."""
+    try:
+        async for mensagem in canal.history(limit=50):
+            if bot.user is None or mensagem.author.id != bot.user.id:
+                continue
+            if not mensagem.embeds:
+                continue
+            embed_existente = mensagem.embeds[0]
+            if embed_existente.title != titulo_esperado:
+                continue
+            if embed_existente.fields:
+                continue  # painel não tem campos; carta individual tem
+            return mensagem
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+    return None
+
+
 async def _publicar_ou_reaproveitar_painel(
     canal, dados: dict, chave_id: str, embed: discord.Embed, view: discord.ui.View
 ):
-    """Edita a mensagem do painel se ela ainda existir; senão manda uma nova."""
+    """Edita a mensagem do painel se ela ainda existir. Se o ID salvo não
+    funcionar (ou nem existir), procura no histórico do canal antes de mandar
+    uma mensagem nova — assim, mesmo se _CARTA_DATA_PATH não tiver persistido
+    entre deploys, o painel não duplica."""
     mensagem_id = dados.get(chave_id)
     if mensagem_id:
         try:
@@ -174,6 +200,16 @@ async def _publicar_ou_reaproveitar_painel(
             return mensagem
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
+
+    existente = await _achar_painel_existente(canal, embed.title)
+    if existente is not None:
+        try:
+            await existente.edit(embed=embed, view=view)
+            print(f"[pinkie-carta] achei um painel existente no histórico (msg {existente.id}) e reaproveitei em vez de duplicar.")
+            return existente
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
     return await canal.send(embed=embed, view=view)
 
 
@@ -303,7 +339,14 @@ def _carregar_dados_carta() -> dict:
     try:
         with open(_CARTA_DATA_PATH, "r", encoding="utf-8") as f:
             dados = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except FileNotFoundError:
+        print(
+            f"[pinkie-carta] {_CARTA_DATA_PATH} não existe ainda (primeira vez, ou o "
+            f"volume persistente não tá montado nesse caminho) — começando do zero."
+        )
+        dados = {}
+    except json.JSONDecodeError as e:
+        print(f"[pinkie-carta] {_CARTA_DATA_PATH} tá corrompido ({e!r}) — começando do zero.")
         dados = {}
     dados.setdefault("painel_mensagem_id", None)
     dados.setdefault("cartas", {})
@@ -311,6 +354,9 @@ def _carregar_dados_carta() -> dict:
 
 
 def _salvar_dados_carta(dados: dict) -> None:
+    """Grava o JSON em disco. Se isso falhar silenciosamente (ex.: Railway sem
+    Volume persistente montado em _CARTA_DATA_PATH), o painel/cartas somem a
+    cada deploy — por isso o print de erro é bem explícito."""
     try:
         pasta = os.path.dirname(_CARTA_DATA_PATH)
         if pasta:
@@ -318,7 +364,11 @@ def _salvar_dados_carta(dados: dict) -> None:
         with open(_CARTA_DATA_PATH, "w", encoding="utf-8") as f:
             json.dump(dados, f, ensure_ascii=False, indent=2)
     except OSError as e:
-        print(f"[pinkie-carta] não consegui salvar {_CARTA_DATA_PATH}: {e!r}")
+        print(
+            f"[pinkie-carta] ⚠️ NÃO CONSEGUI SALVAR {_CARTA_DATA_PATH}: {e!r} — "
+            f"confere se existe um Volume do Railway montado exatamente nesse "
+            f"caminho, senão o painel vai duplicar a cada deploy."
+        )
 
 
 def _gerar_id_carta() -> str:

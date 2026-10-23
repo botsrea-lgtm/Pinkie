@@ -29,6 +29,12 @@ anônima), que cai num canal de revisão pra staff aprovar ou recusar
 antes de ir pro mundo — a votação é feita REAGINDO com ✅ ou ❌ na
 mensagem, sem botão nenhum.
 
+E também o sistema de ANIVERSÁRIOS: no canal CANAL_ANIVERSARIO_ID,
+basta a pessoa mandar a data (ex.: "13/05") que a Pinkie registra.
+Se ela já tinha um aniversário salvo e mandar outra data, a Pinkie
+pergunta com botões (Sim, alterar / Não, manter). No dia certo, ela
+manda os parabéns no mesmo canal. Fora desse canal, datas são ignoradas.
+
 COMO USAR
 ──────────
 1. pip install -U discord.py python-dotenv
@@ -50,9 +56,15 @@ import re
 import time
 import unicodedata
 import uuid
+from datetime import date, datetime, timedelta, timezone
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # Python < 3.9
+    ZoneInfo = None
 
 try:
     from dotenv import load_dotenv
@@ -82,6 +94,10 @@ CANAL_PAINEL_CARTA_ID = 1549826297834766447        # canal dos membros — onde 
 CANAL_REVISAO_CARTA_ID = 1549826189802348694       # canal da staff — onde a staff avalia as cartas
 CANAL_PUBLICACAO_CARTA_ID = 1538287965116039211    # canal público — onde a carta é postada quando aceita
 
+# Canal do sistema de Aniversários — é o ÚNICO canal onde dá pra registrar/alterar
+# o aniversário, e também onde a Pinkie manda os parabéns no dia certo.
+CANAL_ANIVERSARIO_ID = 1563265822120484934
+
 # Imagem que acompanha o painel da Carta Surpresa (mostrada no embed pros membros)
 IMAGEM_PAINEL_CARTA_URL = (
     "https://cdn.discordapp.com/attachments/926913851172204577/"
@@ -94,6 +110,7 @@ EMOJI_ACEITAR = "✅"
 EMOJI_RECUSAR = "❌"
 
 _CARTA_DATA_PATH = os.getenv("PINKIE_CARTA_DATA_PATH", "/data/pinkie_carta.json")
+_ANIVERSARIO_DATA_PATH = os.getenv("PINKIE_ANIVERSARIO_DATA_PATH", "/data/pinkie_aniversarios.json")
 
 intents = discord.Intents.default()
 intents.members = True
@@ -405,6 +422,19 @@ async def on_ready():
     except Exception as e:
         print(f"[pinkie-carta] erro ao configurar o painel da carta surpresa: {e!r}")
 
+    # on_ready pode rodar mais de uma vez (reconexões) — só prepara os
+    # aniversários e inicia os loops se eles ainda não estiverem rodando.
+    if not _checar_aniversarios.is_running():
+        _verificar_armazenamento_aniversario()
+        try:
+            # Antes de qualquer parabéns, lê o canal INTEIRO e reconstrói o que
+            # estiver faltando no /data (ex.: volume novo, JSON perdido).
+            await _sincronizar_aniversarios_do_historico()
+        except Exception as e:
+            print(f"[pinkie-aniversario] erro ao ler o histórico do canal: {e!r}")
+        _checar_aniversarios.start()
+        _ressincronizar_aniversarios.start()
+
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -412,6 +442,13 @@ async def on_message(message: discord.Message):
         return
 
     conteudo = message.content or ""
+
+    # Canal de aniversários: se a mensagem for uma data (ex.: "13/05"), a
+    # Pinkie registra/atualiza o aniversário e pronto. Só funciona NESSE
+    # canal — a mesma mensagem em qualquer outro canal é ignorada aqui.
+    if message.channel.id == CANAL_ANIVERSARIO_ID and _ANIVERSARIO_REGEX.match(conteudo):
+        await _tratar_mensagem_aniversario(message, conteudo)
+        return
 
     # Se marcou a Pinkie com uma @menção DE VERDADE (escolhida no autocomplete
     # do Discord, o que deixa a tag "<@ID>" escrita no texto) ou falou o nome
@@ -452,6 +489,462 @@ async def cmd_configurar_carta(ctx: commands.Context):
         return
     status = await _configurar_painel_carta()
     await ctx.reply(f"🎪 {status}")
+
+
+# ══════════════════════════════════════════════════════════════════
+# ANIVERSÁRIOS DA PINKIE — registro por mensagem + parabéns no dia
+#
+# Funciona SÓ em CANAL_ANIVERSARIO_ID. A pessoa manda a data (dd/mm,
+# aceita também dd-mm, dd.mm e, se quiser, com ano no fim — o ano é
+# ignorado e nunca é salvo). A Pinkie responde:
+#
+#   • sem aniversário salvo  → registra e confirma.
+#   • já tinha o MESMO dia   → avisa que já estava anotado.
+#   • já tinha OUTRO dia     → pergunta com botões "Sim, alterar" /
+#                              "Não, manter" (só quem escreveu clica).
+#
+# Um loop checa de 10 em 10 minutos (fuso de São Paulo) se tem alguém
+# fazendo aniversário e manda os parabéns no mesmo canal, uma vez só
+# por ano. Quem nasceu em 29/02 é parabenizado em 28/02 nos anos não
+# bissextos.
+#
+# Tudo é salvo em /data/pinkie_aniversarios.json e, além disso, a Pinkie
+# relê o canal inteiro ao ligar (e de 6 em 6 horas) pra recuperar qualquer
+# aniversário que estiver faltando — o canal é o backup. O bot precisa da
+# permissão "Ler Histórico de Mensagens" nesse canal.
+# ══════════════════════════════════════════════════════════════════
+
+# Fuso usado pra decidir "que dia é hoje" (tem fallback fixo UTC-3 caso o
+# sistema não tenha o banco de fusos instalado — o Brasil não usa mais
+# horário de verão, então UTC-3 fixo é seguro).
+try:
+    _FUSO_ANIVERSARIO = ZoneInfo("America/Sao_Paulo") if ZoneInfo else timezone(timedelta(hours=-3))
+except Exception:
+    _FUSO_ANIVERSARIO = timezone(timedelta(hours=-3))
+
+# Mensagem inteira tem que ser só uma data: "13/05", "13-5", "13.05", "13/05/2000".
+_ANIVERSARIO_REGEX = re.compile(
+    r"^\s*(\d{1,2})\s*[/\-.]\s*(\d{1,2})(?:\s*[/\-.]\s*\d{2,4})?\s*$"
+)
+
+FRASES_PARABENS = [
+    "🎉 PARABÉÉÉNS, {alvo}!! hoje o picadeiro inteiro é seu! 🥳🎈",
+    "🎂 {alvo}, hoje é SEU dia!! confete, balão e bolo (imaginário) por minha conta! 🎊",
+    "🤡🎈 *POFT* apareci só pra te dar os parabéns, {alvo}!! que seu dia seja uma festa!",
+]
+
+
+def _carregar_dados_aniversario() -> dict:
+    try:
+        with open(_ANIVERSARIO_DATA_PATH, "r", encoding="utf-8") as f:
+            dados = json.load(f)
+    except FileNotFoundError:
+        print(
+            f"[pinkie-aniversario] {_ANIVERSARIO_DATA_PATH} não existe ainda (primeira vez, "
+            f"ou o volume persistente não tá montado nesse caminho) — começando do zero."
+        )
+        dados = {}
+    except json.JSONDecodeError as e:
+        print(f"[pinkie-aniversario] {_ANIVERSARIO_DATA_PATH} tá corrompido ({e!r}) — começando do zero.")
+        dados = {}
+    dados.setdefault("aniversarios", {})  # {"<user_id>": {"dia": 13, "mes": 5}}
+    dados.setdefault("parabens", {})      # {"<user_id>": "<ano em que já foi parabenizado>"}
+    return dados
+
+
+def _salvar_dados_aniversario(dados: dict) -> None:
+    """Grava em /data (ou no caminho de PINKIE_ANIVERSARIO_DATA_PATH). Escreve
+    num arquivo temporário e troca no final, assim um crash no meio da
+    gravação nunca deixa o JSON pela metade."""
+    try:
+        pasta = os.path.dirname(_ANIVERSARIO_DATA_PATH)
+        if pasta:
+            os.makedirs(pasta, exist_ok=True)
+        tmp = _ANIVERSARIO_DATA_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(dados, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, _ANIVERSARIO_DATA_PATH)
+    except OSError as e:
+        print(
+            f"[pinkie-aniversario] ⚠️ NÃO CONSEGUI SALVAR {_ANIVERSARIO_DATA_PATH}: {e!r} — "
+            f"confere se existe um Volume montado nesse caminho, senão os aniversários "
+            f"somem a cada deploy."
+        )
+
+
+def _formatar_data(dia: int, mes: int) -> str:
+    return f"{dia:02d}/{mes:02d}"
+
+
+def _parse_aniversario(conteudo: str):
+    """Devolve (dia, mes) se for uma data válida, ou None. Usa 2000 (ano
+    bissexto) só pra validar, assim 29/02 é aceito."""
+    m = _ANIVERSARIO_REGEX.match(conteudo)
+    if not m:
+        return None
+    dia, mes = int(m.group(1)), int(m.group(2))
+    try:
+        date(2000, mes, dia)
+    except ValueError:
+        return None
+    return dia, mes
+
+
+def _embed_aniversario(titulo: str, descricao: str) -> discord.Embed:
+    embed = discord.Embed(title=titulo, description=descricao, color=COR_PINKIE)
+    embed.set_footer(text="🎪 Pinkie Pie  •  aniversários")
+    embed.timestamp = discord.utils.utcnow()
+    return embed
+
+
+class _ViewConfirmarAlteracao(discord.ui.View):
+    """Botões "Sim, alterar" / "Não, manter" que aparecem quando alguém que
+    já tem aniversário registrado manda uma data diferente. Só quem escreveu
+    a data consegue clicar. Depois de clicar (ou do tempo acabar), os botões
+    ficam desativados."""
+
+    def __init__(self, autor_id: int, dia: int, mes: int):
+        super().__init__(timeout=120)
+        self.autor_id = autor_id
+        self.dia = dia
+        self.mes = mes
+        self.message = None  # preenchido depois de enviar, usado no timeout
+
+    def _desativar(self):
+        for item in self.children:
+            item.disabled = True
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.autor_id:
+            await interaction.response.send_message(
+                "Esses botões são da pessoa que mandou a data! 🎈", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Sim, alterar", emoji="✅", style=discord.ButtonStyle.success)
+    async def sim(self, interaction: discord.Interaction, button: discord.ui.Button):
+        dados = _carregar_dados_aniversario()
+        dados["aniversarios"][str(self.autor_id)] = {"dia": self.dia, "mes": self.mes}
+        # Se mudou a data, libera os parabéns de novo (vale pro ano atual).
+        dados["parabens"].pop(str(self.autor_id), None)
+        _salvar_dados_aniversario(dados)
+
+        self._desativar()
+        embed = _embed_aniversario(
+            "🎂 Aniversário Atualizado!!",
+            f"prontinho, <@{self.autor_id}>!! seu novo aniversário é "
+            f"**{_formatar_data(self.dia, self.mes)}** 🥳🎈",
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+        self.stop()
+
+    @discord.ui.button(label="Não, manter", emoji="🚫", style=discord.ButtonStyle.danger)
+    async def nao(self, interaction: discord.Interaction, button: discord.ui.Button):
+        dados = _carregar_dados_aniversario()
+        atual = dados["aniversarios"].get(str(self.autor_id))
+        texto_atual = _formatar_data(atual["dia"], atual["mes"]) if atual else "o que já estava"
+
+        self._desativar()
+        embed = _embed_aniversario(
+            "🎂 Tudo certo, mantive!",
+            f"ok!! continua valendo **{texto_atual}** 🎈",
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+        self.stop()
+
+    async def on_timeout(self):
+        self._desativar()
+        if self.message is not None:
+            try:
+                embed = _embed_aniversario(
+                    "🎂 Ficou sem resposta…",
+                    "ninguém clicou, então mantive seu aniversário como estava! 🎈\n"
+                    "se ainda quiser mudar, é só mandar a data de novo.",
+                )
+                await self.message.edit(embed=embed, view=self)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+
+async def _tratar_mensagem_aniversario(message: discord.Message, conteudo: str) -> None:
+    """Roda quando alguém manda algo com cara de data no canal de aniversário."""
+    data = _parse_aniversario(conteudo)
+    if data is None:
+        await message.reply(
+            "Hmm, essa data não existe no meu calendário de palhaça! 🤡\n"
+            "manda assim: **dia/mês** (ex.: `13/05`).",
+            mention_author=False,
+        )
+        return
+
+    dia, mes = data
+    dados = _carregar_dados_aniversario()
+    existente = dados["aniversarios"].get(str(message.author.id))
+
+    # 1) Primeira vez: registra direto.
+    if existente is None:
+        dados["aniversarios"][str(message.author.id)] = {"dia": dia, "mes": mes}
+        _salvar_dados_aniversario(dados)
+        embed = _embed_aniversario(
+            "🎂 Aniversário Registrado!!",
+            f"anotei aqui, {message.author.mention}!! 🤡🎈\n\n"
+            f"📅 Seu aniversário: **{_formatar_data(dia, mes)}**\n"
+            f"no dia certo eu venho aqui dar parabéns pra você!! 🥳🎊",
+        )
+        await message.reply(embed=embed)
+        return
+
+    # 2) Mesmo dia que já estava salvo: não precisa perguntar nada.
+    if existente["dia"] == dia and existente["mes"] == mes:
+        embed = _embed_aniversario(
+            "🎂 Já tava anotado!",
+            f"seu aniversário já é **{_formatar_data(dia, mes)}** mesmo, {message.author.mention}! 🎈",
+        )
+        await message.reply(embed=embed, mention_author=False)
+        return
+
+    # 3) Data diferente: pergunta antes de trocar.
+    embed = _embed_aniversario(
+        "🎂 Quer mudar seu aniversário?",
+        f"{message.author.mention}, eu já tenho **{_formatar_data(existente['dia'], existente['mes'])}** "
+        f"anotado pra você.\n"
+        f"quer trocar pra **{_formatar_data(dia, mes)}**? 🤔🎈",
+    )
+    view = _ViewConfirmarAlteracao(message.author.id, dia, mes)
+    view.message = await message.reply(embed=embed, view=view)
+
+
+def _aniversariantes_de_hoje(dados: dict, hoje: date) -> list:
+    """IDs (str) de quem faz aniversário hoje e ainda não foi parabenizado
+    neste ano. Em ano não bissexto, quem é de 29/02 é parabenizado em 28/02."""
+    ano = str(hoje.year)
+    bissexto = (hoje.year % 4 == 0 and hoje.year % 100 != 0) or hoje.year % 400 == 0
+    resultado = []
+    for user_id, reg in dados["aniversarios"].items():
+        if dados["parabens"].get(user_id) == ano:
+            continue
+        bate = (reg["dia"], reg["mes"]) == (hoje.day, hoje.month)
+        if not bate and not bissexto and (reg["dia"], reg["mes"]) == (29, 2) and (hoje.day, hoje.month) == (28, 2):
+            bate = True
+        if bate:
+            resultado.append(user_id)
+    return resultado
+
+
+@tasks.loop(minutes=10)
+async def _checar_aniversarios():
+    """De 10 em 10 minutos vê quem faz aniversário hoje (no fuso de São Paulo)
+    e manda os parabéns no canal de aniversários, uma vez só por ano."""
+    try:
+        hoje = datetime.now(_FUSO_ANIVERSARIO).date()
+        dados = _carregar_dados_aniversario()
+        pendentes = _aniversariantes_de_hoje(dados, hoje)
+        if not pendentes:
+            return
+
+        canal = await _garantir_canal(CANAL_ANIVERSARIO_ID)
+        if canal is None:
+            print(f"[pinkie-aniversario] não encontrei o canal {CANAL_ANIVERSARIO_ID} pra mandar os parabéns.")
+            return
+
+        for user_id in pendentes:
+            membro = canal.guild.get_member(int(user_id)) if getattr(canal, "guild", None) else None
+            if membro is None:
+                continue  # saiu do servidor — não parabeniza (nem marca, caso volte no mesmo dia)
+
+            embed = _embed_aniversario(
+                "🎂 Feliz Aniversário!!",
+                frase_aleatoria(FRASES_PARABENS).format(alvo=membro.mention),
+            )
+            try:
+                await canal.send(content=membro.mention, embed=embed)
+            except (discord.Forbidden, discord.HTTPException) as e:
+                print(f"[pinkie-aniversario] não consegui mandar os parabéns pra {user_id}: {e!r}")
+                continue
+
+            dados["parabens"][user_id] = str(hoje.year)
+            _salvar_dados_aniversario(dados)
+    except Exception as e:
+        print(f"[pinkie-aniversario] erro no loop de parabéns: {e!r}")
+
+
+# ── Memória infinita: o canal inteiro é o "backup" dos aniversários ──────
+# O /data é a fonte principal, mas o próprio canal também guarda tudo: cada
+# "Aniversário Registrado!!" / "Aniversário Atualizado!!" (da Pinkie ou de
+# outro bot com o mesmo formato, tipo a Lilu), cada "Feliz Aniversário!!" e
+# cada data mandada por alguém. Na inicialização (e de 6 em 6 horas) a Pinkie
+# relê o canal do começo ao fim e completa o que estiver faltando no /data —
+# então, mesmo se o volume for apagado, ela não esquece de ninguém.
+#
+# Regra de ouro: o que já está no /data NUNCA é sobrescrito pelo histórico,
+# o histórico só preenche quem estiver faltando.
+
+_RE_DATA_EM_EMBED = re.compile(r"(\d{1,2})\s*/\s*(\d{1,2})")
+_RE_MENCAO_EM_TEXTO = re.compile(r"<@!?(\d+)>")
+
+
+def _verificar_armazenamento_aniversario() -> None:
+    """Log claro de onde os aniversários estão sendo salvos e se dá pra gravar."""
+    pasta = os.path.dirname(_ANIVERSARIO_DATA_PATH) or "."
+    try:
+        os.makedirs(pasta, exist_ok=True)
+        teste = os.path.join(pasta, ".pinkie_teste_escrita")
+        with open(teste, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(teste)
+        print(f"[pinkie-aniversario] salvando aniversários em {_ANIVERSARIO_DATA_PATH} ✅")
+    except OSError as e:
+        print(
+            f"[pinkie-aniversario] ⚠️ NÃO consigo gravar em {pasta!r}: {e!r} — "
+            f"monta um Volume nesse caminho. Enquanto isso o bot se vira relendo o "
+            f"histórico do canal, mas o certo é o /data funcionar."
+        )
+
+
+def _tipo_embed_aniversario(embed: discord.Embed):
+    """'registrado', 'atualizado' ou 'parabens' se o embed for de um desses
+    eventos; None caso contrário."""
+    titulo = _normalizar(embed.title or "")
+    if "aniversario registrado" in titulo:
+        return "registrado"
+    if "aniversario atualizado" in titulo:
+        return "atualizado"
+    if "feliz aniversario" in titulo:
+        return "parabens"
+    return None
+
+
+async def _autor_do_evento(msg: discord.Message, embed: discord.Embed):
+    """Descobre de QUEM é o evento: pela @menção no embed ou, se não tiver
+    (caso do 'Atualizado' de outros bots), pela mensagem à qual o bot respondeu."""
+    achou = _RE_MENCAO_EM_TEXTO.search(embed.description or "")
+    if achou:
+        return int(achou.group(1))
+
+    ref = msg.reference
+    if ref is None:
+        return None
+    original = ref.resolved or ref.cached_message
+    if not isinstance(original, discord.Message) and ref.message_id:
+        try:
+            original = await msg.channel.fetch_message(ref.message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+    if isinstance(original, discord.Message) and not original.author.bot:
+        return original.author.id
+    return None
+
+
+async def _ler_historico_aniversarios():
+    """Relê o canal de aniversários do começo ao fim, em ordem cronológica, e
+    devolve (aniversarios, parabens, qtd_mensagens) com o que dá pra deduzir:
+
+      • embed 'Registrado'/'Atualizado' → vale a data que está nele;
+      • mensagem de pessoa só com uma data → vale SÓ se essa pessoa ainda não
+        tinha nenhuma (mudança de data exige confirmação, então uma data nova
+        sozinha não troca nada);
+      • embed 'Feliz Aniversário' → marca o ano em que a pessoa já foi parabenizada.
+    """
+    canal = await _garantir_canal(CANAL_ANIVERSARIO_ID)
+    if canal is None or not hasattr(canal, "history"):
+        print(f"[pinkie-aniversario] não achei o canal {CANAL_ANIVERSARIO_ID} pra reler o histórico.")
+        return None
+
+    aniversarios = {}
+    parabens = {}
+    lidas = 0
+
+    try:
+        async for msg in canal.history(limit=None, oldest_first=True):
+            lidas += 1
+
+            if not msg.author.bot:
+                data = _parse_aniversario(msg.content or "")
+                if data and str(msg.author.id) not in aniversarios:
+                    aniversarios[str(msg.author.id)] = {"dia": data[0], "mes": data[1]}
+                continue
+
+            if not msg.embeds:
+                continue
+            embed = msg.embeds[0]
+            tipo = _tipo_embed_aniversario(embed)
+            if tipo is None:
+                continue
+
+            uid = await _autor_do_evento(msg, embed)
+            if uid is None:
+                continue
+
+            if tipo == "parabens":
+                ano = msg.created_at.astimezone(_FUSO_ANIVERSARIO).year
+                parabens[str(uid)] = max(ano, int(parabens.get(str(uid), 0)))
+                continue
+
+            achou = _RE_DATA_EM_EMBED.search(embed.description or "")
+            if not achou:
+                continue
+            dia, mes = int(achou.group(1)), int(achou.group(2))
+            try:
+                date(2000, mes, dia)
+            except ValueError:
+                continue
+            aniversarios[str(uid)] = {"dia": dia, "mes": mes}
+    except (discord.Forbidden, discord.HTTPException) as e:
+        print(
+            f"[pinkie-aniversario] ⚠️ parei de ler o histórico no meio ({e!r}) — o bot "
+            f"precisa da permissão 'Ler Histórico de Mensagens' no canal. Usando o que deu pra ler."
+        )
+
+    return aniversarios, parabens, lidas
+
+
+async def _sincronizar_aniversarios_do_historico() -> None:
+    """Lê o canal e completa o /data com quem estiver faltando. Nunca
+    sobrescreve o que já está salvo."""
+    resultado = await _ler_historico_aniversarios()
+    if resultado is None:
+        return
+    aniversarios, parabens, lidas = resultado
+
+    # Daqui pra baixo NÃO tem nenhum await de propósito: carrega, mescla e salva
+    # tudo de uma vez, assim um registro feito ao vivo durante a leitura não se perde.
+    dados = _carregar_dados_aniversario()
+    novos = 0
+    for uid, reg in aniversarios.items():
+        if uid not in dados["aniversarios"]:
+            dados["aniversarios"][uid] = reg
+            novos += 1
+
+    parabens_novos = 0
+    for uid, ano in parabens.items():
+        atual = int(dados["parabens"].get(uid, 0) or 0)
+        if ano > atual:
+            dados["parabens"][uid] = str(ano)
+            parabens_novos += 1
+
+    if novos or parabens_novos:
+        _salvar_dados_aniversario(dados)
+    print(
+        f"[pinkie-aniversario] li {lidas} mensagens do canal: {novos} aniversário(s) "
+        f"recuperado(s), {parabens_novos} parabéns já dados reconhecido(s). "
+        f"Total salvo: {len(dados['aniversarios'])}."
+    )
+
+
+@tasks.loop(hours=6)
+async def _ressincronizar_aniversarios():
+    """De 6 em 6 horas relê o canal (pega o que foi mandado enquanto o bot
+    estava fora do ar, por exemplo). A 1ª execução é pulada porque o on_ready
+    já acabou de fazer a leitura completa."""
+    if _ressincronizar_aniversarios.current_loop == 0:
+        return
+    try:
+        await _sincronizar_aniversarios_do_historico()
+    except Exception as e:
+        print(f"[pinkie-aniversario] erro ao reler o histórico: {e!r}")
 
 
 # ══════════════════════════════════════════════════════════════════
